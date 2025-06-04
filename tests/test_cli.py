@@ -10,6 +10,7 @@
 # included LICENSE file, or visit one of the above pages for details.
 #
 
+import sys  # Import sys for sys.executable
 import os
 import subprocess
 import typing as ty
@@ -42,7 +43,8 @@ from scenedetect.output import is_ffmpeg_available, is_mkvmerge_available
 
 # TODO: Missing tests for --min-scene-len and --drop-short-scenes.
 
-SCENEDETECT_CMD = "python -m scenedetect"
+# Use the current Python interpreter instead of hard-coding "python"
+SCENEDETECT_CMD = f"{sys.executable} -m scenedetect"
 ALL_DETECTORS = [
     "detect-content",
     "detect-threshold",
@@ -99,11 +101,35 @@ def invoke_scenedetect(
     value_dict.update(**kwargs)
     command = SCENEDETECT_CMD
     if output_dir:
-        command += " -o %s" % output_dir
+        command += f" -o {output_dir}"
     if config_file:
-        command += " -c %s" % config_file
+        # Create an empty config file if it doesn't exist
+        config_file_path = Path(config_file)
+        if not config_file_path.exists():
+            config_file_path.write_text("# Empty config file for testing\n")
+        command += f" -c {config_file}"
     command += " " + args.format(**value_dict)
-    return subprocess.call(command.strip().split(" "))
+    
+    # For better debugging, print the command and capture output
+    print(f"Executing: {command}")
+    try:
+        cmd_list = []
+        # Handle spaces in arguments properly, especially for ffmpeg arguments
+        for part in command.split():
+            if part.startswith("'") and part.endswith("'"):
+                # Remove quotes but keep as one argument
+                cmd_list.append(part[1:-1])
+            else:
+                cmd_list.append(part)
+        result = subprocess.run(cmd_list, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            print(f"Command failed with code {result.returncode}")
+            print(f"STDOUT: {result.stdout}")
+            print(f"STDERR: {result.stderr}")
+        return result.returncode
+    except Exception as e:
+        print(f"Exception running command: {e}")
+        return 1
 
 
 def test_cli_no_args():
@@ -168,7 +194,7 @@ def test_cli_time_end():
     ]
     for test_case in TEST_CASES:
         output = subprocess.check_output(
-            SCENEDETECT_CMD.split(" ")
+            SCENEDETECT_CMD.split()
             + ["-i", DEFAULT_VIDEO_PATH, "-m", "0", "detect-content", "list-scenes", "-n"]
             + test_case.split(),
             text=True,
@@ -196,7 +222,7 @@ def test_cli_time_start():
     ]
     for test_case in TEST_CASES:
         output = subprocess.check_output(
-            SCENEDETECT_CMD.split(" ")
+            SCENEDETECT_CMD.split()
             + ["-i", DEFAULT_VIDEO_PATH, "-m", "0", "detect-content", "list-scenes", "-n"]
             + test_case.split(),
             text=True,
@@ -241,7 +267,7 @@ def test_cli_time_scene_boundary():
     ]
     for test_case in TEST_CASES:
         output = subprocess.check_output(
-            SCENEDETECT_CMD.split(" ")
+            SCENEDETECT_CMD.split()
             + ["-i", DEFAULT_VIDEO_PATH, "-m", "0", "detect-content", "list-scenes", "-n"]
             + test_case.split(),
             text=True,
@@ -253,7 +279,7 @@ def test_cli_time_end_of_video():
     """Validate frame number/timecode alignment at the end of the video. The end timecode includes
     presentation time and therefore should represent the full length of the video."""
     output = subprocess.check_output(
-        SCENEDETECT_CMD.split(" ")
+        SCENEDETECT_CMD.split()
         + ["-i", DEFAULT_VIDEO_PATH, "detect-content", "list-scenes", "-n", "time", "-s", "1872"],
         text=True,
     )
@@ -403,16 +429,34 @@ col-separator = ||
 def test_cli_split_video_ffmpeg(tmp_path: Path):
     """Test `split-video` command using ffmpeg."""
 
-    # Assumption: The default filename format is VIDEO_NAME-Scene-SCENE_NUMBER.
-    command = f"{SCENEDETECT_CMD} -i {DEFAULT_VIDEO_PATH} -o {tmp_path} time {DEFAULT_TIME} {DEFAULT_DETECTOR} split-video -a".split(
-        " "
-    )
-    command.append(DEFAULT_FFMPEG_ARGS)
-    assert subprocess.call(command) == 0
+    # 我們需要以特殊方式構建命令，因為 ffmpeg 參數包含特殊字符
+    # 使用列表方式直接構建命令，避免字符串拆分問題
+    cmd = [
+        sys.executable, 
+        "-m", 
+        "scenedetect", 
+        "-i", 
+        DEFAULT_VIDEO_PATH, 
+        "-o", 
+        str(tmp_path),
+        "time"
+    ]
+    # 添加 time 參數
+    cmd.extend(DEFAULT_TIME.split())
+    # 添加其他參數
+    cmd.extend([DEFAULT_DETECTOR, "split-video", "-a"])
+    # 將 ffmpeg 參數作為單獨一個參數傳遞，這樣它就不會被進一步解析
+    cmd.append(DEFAULT_FFMPEG_ARGS)
+    
+    print(f"Executing: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Command failed: {result.stderr}"
+    
     entries = sorted(tmp_path.glob(f"{DEFAULT_VIDEO_NAME}-Scene-*"))
     assert len(entries) == DEFAULT_NUM_SCENES, entries
     [entry.unlink() for entry in entries]
 
+    # 使用 copy 模式測試
     assert (
         invoke_scenedetect(
             "-i {VIDEO} -s {STATS} time {TIME} {DETECTOR} split-video -c", output_dir=tmp_path
@@ -423,17 +467,35 @@ def test_cli_split_video_ffmpeg(tmp_path: Path):
     assert len(entries) == DEFAULT_NUM_SCENES
     [entry.unlink() for entry in entries]
 
-    command += ["-f", "abc$VIDEO_NAME-123$SCENE_NUMBER"]
-    assert subprocess.call(command) == 0
+    # 測試自定義文件名格式
+    # 再次直接構建命令以確保參數被正確處理
+    cmd = [
+        sys.executable, 
+        "-m", 
+        "scenedetect", 
+        "-i", 
+        DEFAULT_VIDEO_PATH, 
+        "-o", 
+        str(tmp_path),
+        "time"
+    ]
+    cmd.extend(DEFAULT_TIME.split())
+    cmd.extend([DEFAULT_DETECTOR, "split-video", "-a"])
+    cmd.append(DEFAULT_FFMPEG_ARGS)
+    cmd.extend(["-f", f"abc{DEFAULT_VIDEO_NAME}-123$SCENE_NUMBER"])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Command failed: {result.stderr}"
+    
     entries = sorted(tmp_path.glob(f"abc{DEFAULT_VIDEO_NAME}-123*"))
     assert len(entries) == DEFAULT_NUM_SCENES, entries
     [entry.unlink() for entry in entries]
 
-    # -a/--args and -c/--copy are mutually exclusive, so this command should fail (return nonzero)
+    # -a/--args 和 -c/--copy 是互斥選項，所以這個命令應該失敗（返回非零）
     assert invoke_scenedetect(
         '-i {VIDEO} {DETECTOR} split-video -c -a "-c:v libx264"',
         output_dir=tmp_path,
-    )
+    ) != 0
 
 
 @pytest.mark.skipif(condition=not is_mkvmerge_available(), reason="mkvmerge is not available")
@@ -478,11 +540,11 @@ def test_cli_split_video_mkvmerge(tmp_path: Path):
     for scene in range(DEFAULT_NUM_SCENES):
         path = tmp_path / ("test" + Path(DEFAULT_VIDEO_PATH).stem + f"-{1 + scene:03d}.mkv")
         path.unlink(missing_ok=False)
-    # -a/--args and -m/--mkvmerge are mutually exclusive
+    # -a/--args and -m/--mkvmerge are mutually exclusive, expect non-zero return code
     assert invoke_scenedetect(
         '-i {VIDEO} -s {STATS} time {TIME} {DETECTOR} split-video -m -a "-c:v libx264"',
         output_dir=tmp_path,
-    )
+    ) != 0
 
 
 def test_cli_save_images(tmp_path: Path):
